@@ -80,10 +80,12 @@ const Dashboard = () => {
     "https://cloudflare-eth.com";
 
   // Some public RPCs don't support `eth_newFilter` which ethers uses for event subscriptions.
-  // We also set `staticNetwork: true` to avoid chainId detection failures that can block the provider.
+  // We also pass an explicit `chainId` to fully disable network auto-detection (which can fail).
+  // Override via `REACT_APP_CHAIN_ID` if ERBB is not on Ethereum mainnet.
+  const chainId = Number(process.env.REACT_APP_CHAIN_ID || 1);
   const provider = useMemo(
-    () => new ethers.JsonRpcProvider(RPC_URL, undefined, { staticNetwork: true }),
-    [RPC_URL]
+    () => new ethers.JsonRpcProvider(RPC_URL, chainId, { staticNetwork: true }),
+    [RPC_URL, chainId]
   );
   const contract = useMemo(() => new ethers.Contract(ERBB_ADDRESS, ERBB_ABI, provider), [provider]);
 
