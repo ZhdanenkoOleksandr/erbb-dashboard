@@ -1,0 +1,11 @@
+node_modules/
+build/
+.DS_Store
+
+# CRA env files (if you add them later)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+

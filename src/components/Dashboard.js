@@ -1,0 +1,263 @@
+import React, { useEffect, useMemo, useState } from "react";
+import axios from "axios";
+import { ethers } from "ethers";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+
+import SignalCard from "./SignalCard";
+import InsightList from "./InsightList";
+
+// ERBB Smart Contract
+const ERBB_ADDRESS = "0x5702A4487dA07c827cdE512e2d5969CB430cd839";
+
+// Minimal-but-flexible ABI:
+// - price functions are "best-effort" candidates (no-arg view functions)
+// - events are optional; if the contract emits them, we update from events
+const ERBB_ABI = [
+  "function decimals() view returns (uint8)",
+  "function getPrice() view returns (uint256)",
+  "function price() view returns (uint256)",
+  "function currentPrice() view returns (uint256)",
+  "function tokenPrice() view returns (uint256)",
+  "function getTokenPrice() view returns (uint256)",
+  "event PriceUpdated(uint256 price)",
+  "event ERBBPriceUpdated(uint256 price)",
+];
+
+const PRICE_FUNCTION_CANDIDATES = [
+  "getPrice",
+  "price",
+  "currentPrice",
+  "tokenPrice",
+  "getTokenPrice",
+];
+
+const formatTimeLabel = (ms) => {
+  const d = new Date(ms);
+  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+};
+
+const normalizeSignal = (data) => {
+  const rawSignal = data?.signal ?? data?.type ?? data?.recommendation ?? data?.name;
+  const signal = typeof rawSignal === "string" ? rawSignal : "HOLD";
+
+  const rawScore =
+    data?.finalScore ?? data?.score ?? data?.confidence ?? data?.finalScore?.score;
+  const finalScore = typeof rawScore === "number" ? rawScore : Number(rawScore);
+
+  return {
+    signal,
+    finalScore: Number.isFinite(finalScore) ? finalScore : 0,
+  };
+};
+
+const normalizeInsights = (data) => {
+  const list = Array.isArray(data)
+    ? data
+    : data?.insights ?? data?.data ?? data?.items ?? [];
+
+  return list.map((x, idx) => ({
+    id: x?.id ?? x?.title ?? idx,
+    title: x?.title ?? x?.headline ?? "Untitled insight",
+    impact: x?.impact ?? x?.summary ?? "—",
+    confidence: x?.confidence ?? x?.probability ?? "—",
+    direction: x?.direction ?? x?.dir ?? x?.trend ?? 0,
+  }));
+};
+
+const Dashboard = () => {
+  const RPC_URL =
+    process.env.REACT_APP_RPC_URL ||
+    // Public RPC fallback (can rate-limit; override via `REACT_APP_RPC_URL` for production).
+    "https://cloudflare-eth.com";
+
+  const provider = useMemo(() => new ethers.JsonRpcProvider(RPC_URL), [RPC_URL]);
+  const contract = useMemo(() => new ethers.Contract(ERBB_ADDRESS, ERBB_ABI, provider), [provider]);
+
+  const [tokenDecimals, setTokenDecimals] = useState(18);
+  const [signal, setSignal] = useState({ signal: "HOLD", finalScore: 0 });
+  const [insights, setInsights] = useState([]);
+  const [erbbPrice, setErbbPrice] = useState(null);
+  const [priceHistory, setPriceHistory] = useState([]);
+  const [lastUpdate, setLastUpdate] = useState(null);
+  const [priceError, setPriceError] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await contract.decimals();
+        if (!cancelled) setTokenDecimals(Number(d));
+      } catch (e) {
+        // If decimals() doesn't exist or call fails, keep default 18.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [contract]);
+
+  const formatRawPrice = (raw) => {
+    try {
+      const asString = ethers.formatUnits(raw, tokenDecimals); // returns string
+      const n = Number(asString);
+      return Number.isFinite(n) ? n : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const appendPricePoint = (price) => {
+    const now = Date.now();
+    setPriceHistory((prev) => {
+      const next = [...prev, { name: formatTimeLabel(now), price }];
+      // Keep chart readable.
+      return next.slice(-60);
+    });
+    setLastUpdate(new Date(now));
+  };
+
+  const fetchErbbPriceFromContract = async () => {
+    for (const fn of PRICE_FUNCTION_CANDIDATES) {
+      try {
+        const raw = await contract[fn]();
+        if (raw == null) continue;
+        const formatted = formatRawPrice(raw);
+        if (formatted != null) return formatted;
+      } catch (e) {
+        // Try next candidate function.
+      }
+    }
+    return null;
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const handler = (rawPrice) => {
+      if (cancelled) return;
+      const formatted = formatRawPrice(rawPrice);
+      if (formatted == null) return;
+
+      setErbbPrice(formatted);
+      appendPricePoint(formatted);
+    };
+
+    // Best-effort subscription: if the contract doesn't emit these events,
+    // it won't break the UI.
+    try {
+      contract.on("PriceUpdated", handler);
+      contract.on("ERBBPriceUpdated", handler);
+    } catch (e) {
+      // Ignore subscription errors.
+    }
+
+    return () => {
+      cancelled = true;
+      try {
+        contract.removeAllListeners("PriceUpdated");
+        contract.removeAllListeners("ERBBPriceUpdated");
+      } catch {
+        // ignore
+      }
+    };
+  }, [contract, tokenDecimals]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const fetchSignal = async () => {
+      try {
+        const res = await axios.get("/api/signal");
+        if (!cancelled) setSignal(normalizeSignal(res.data));
+      } catch (e) {
+        // Non-fatal: keep last known signal.
+      }
+    };
+
+    const fetchInsights = async () => {
+      try {
+        const res = await axios.get("/api/insight");
+        if (!cancelled) setInsights(normalizeInsights(res.data));
+      } catch (e) {
+        // Non-fatal: keep last known insights.
+      }
+    };
+
+    const fetchPrice = async () => {
+      try {
+        const formatted = await fetchErbbPriceFromContract();
+        if (!cancelled && formatted != null) {
+          setPriceError(null);
+          setErbbPrice(formatted);
+          appendPricePoint(formatted);
+        }
+      } catch (e) {
+        if (!cancelled) setPriceError(e?.message ?? "Failed to fetch price");
+      }
+    };
+
+    // Initial load
+    fetchSignal();
+    fetchInsights();
+    fetchPrice();
+
+    const interval = setInterval(() => {
+      fetchSignal();
+      fetchInsights();
+      fetchPrice();
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [contract, tokenDecimals]);
+
+  return (
+    <div style={{ padding: 24, fontFamily: "Arial, sans-serif", maxWidth: 980, margin: "0 auto" }}>
+      <h1 style={{ marginTop: 0 }}>ERBB Dashboard</h1>
+
+      <SignalCard signal={signal.signal} score={signal.finalScore} />
+
+      <div style={{ margin: "12px 0 18px" }}>
+        <div style={{ fontSize: 18, fontWeight: 700 }}>
+          Current ERBB Price:{" "}
+          {erbbPrice == null ? "—" : erbbPrice.toFixed(6)}
+        </div>
+        <div style={{ color: "#6b7280", fontSize: 12, marginTop: 4 }}>
+          Last update: {lastUpdate ? lastUpdate.toLocaleString() : "—"}
+        </div>
+        {priceError ? (
+          <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
+            Price error: {priceError}
+          </div>
+        ) : null}
+      </div>
+
+      <div style={{ margin: "20px 0", width: "100%", height: 320 }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={priceHistory}>
+            <CartesianGrid stroke="#eee" strokeDasharray="5 5" />
+            <XAxis dataKey="name" minTickGap={35} />
+            <YAxis />
+            <Tooltip />
+            <Line type="monotone" dataKey="price" stroke="#6366f1" dot={false} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+
+      <InsightList insights={insights} />
+    </div>
+  );
+};
+
+export default Dashboard;
+
