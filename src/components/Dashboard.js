@@ -150,6 +150,40 @@ const Dashboard = () => {
     return null;
   };
 
+  const fetchErbbPriceFromBackend = async () => {
+    // Last-resort fallback if ABI-based reads don't work on the selected chain/RPC.
+    const endpoints = ["/api/price", "/api/erbb-price", "/api/token-price"];
+
+    for (const ep of endpoints) {
+      try {
+        const res = await axios.get(ep);
+        const data = res?.data ?? {};
+
+        const raw =
+          data?.price ?? data?.erbbPrice ?? data?.tokenPrice ?? data?.currentPrice ?? data?.value;
+
+        if (raw == null) continue;
+
+        // If backend returns raw integer units (as string), format it using tokenDecimals.
+        if (typeof raw === "string" && /^\d+$/.test(raw)) {
+          try {
+            const formatted = formatRawPrice(raw);
+            if (formatted != null) return formatted;
+          } catch {
+            // continue
+          }
+        }
+
+        const n = Number(raw);
+        if (Number.isFinite(n)) return n;
+      } catch {
+        // try next endpoint
+      }
+    }
+
+    return null;
+  };
+
   const EVENT_NAMES = ["PriceUpdated", "ERBBPriceUpdated"];
 
   const safeGetBlockNumber = async () => {
@@ -253,6 +287,11 @@ const Dashboard = () => {
         // 2) Fallback: try events via polling logs
         if (formatted == null) {
           formatted = await fetchErbbPriceFromEvents();
+        }
+
+        // 3) Optional fallback: backend price endpoint (if provided)
+        if (formatted == null) {
+          formatted = await fetchErbbPriceFromBackend();
         }
 
         if (!cancelled && formatted != null) {
