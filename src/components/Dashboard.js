@@ -13,6 +13,7 @@ import {
 
 import SignalCard from "./SignalCard";
 import InsightList from "./InsightList";
+import RulesModal from "./RulesModal";
 
 // ERBB Smart Contract
 const ERBB_ADDRESS = "0x5702A4487dA07c827cdE512e2d5969CB430cd839";
@@ -78,7 +79,12 @@ const Dashboard = () => {
     // Public RPC fallback (can rate-limit; override via `REACT_APP_RPC_URL` for production).
     "https://cloudflare-eth.com";
 
-  const provider = useMemo(() => new ethers.JsonRpcProvider(RPC_URL), [RPC_URL]);
+  // Some public RPCs don't support `eth_newFilter` which ethers uses for event subscriptions.
+  // We also set `staticNetwork: true` to avoid chainId detection failures that can block the provider.
+  const provider = useMemo(
+    () => new ethers.JsonRpcProvider(RPC_URL, undefined, { staticNetwork: true }),
+    [RPC_URL]
+  );
   const contract = useMemo(() => new ethers.Contract(ERBB_ADDRESS, ERBB_ABI, provider), [provider]);
 
   const [tokenDecimals, setTokenDecimals] = useState(18);
@@ -88,6 +94,7 @@ const Dashboard = () => {
   const [priceHistory, setPriceHistory] = useState([]);
   const [lastUpdate, setLastUpdate] = useState(null);
   const [priceError, setPriceError] = useState(null);
+  const [rulesOpen, setRulesOpen] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -141,38 +148,6 @@ const Dashboard = () => {
   useEffect(() => {
     let cancelled = false;
 
-    const handler = (rawPrice) => {
-      if (cancelled) return;
-      const formatted = formatRawPrice(rawPrice);
-      if (formatted == null) return;
-
-      setErbbPrice(formatted);
-      appendPricePoint(formatted);
-    };
-
-    // Best-effort subscription: if the contract doesn't emit these events,
-    // it won't break the UI.
-    try {
-      contract.on("PriceUpdated", handler);
-      contract.on("ERBBPriceUpdated", handler);
-    } catch (e) {
-      // Ignore subscription errors.
-    }
-
-    return () => {
-      cancelled = true;
-      try {
-        contract.removeAllListeners("PriceUpdated");
-        contract.removeAllListeners("ERBBPriceUpdated");
-      } catch {
-        // ignore
-      }
-    };
-  }, [contract, tokenDecimals]);
-
-  useEffect(() => {
-    let cancelled = false;
-
     const fetchSignal = async () => {
       try {
         const res = await axios.get("/api/signal");
@@ -198,6 +173,10 @@ const Dashboard = () => {
           setPriceError(null);
           setErbbPrice(formatted);
           appendPricePoint(formatted);
+        } else if (!cancelled) {
+          setPriceError(
+            "Could not read ERBB price from contract. Check RPC URL and that ABI methods match the deployed contract."
+          );
         }
       } catch (e) {
         if (!cancelled) setPriceError(e?.message ?? "Failed to fetch price");
@@ -223,7 +202,22 @@ const Dashboard = () => {
 
   return (
     <div style={{ padding: 24, fontFamily: "Arial, sans-serif", maxWidth: 980, margin: "0 auto" }}>
-      <h1 style={{ marginTop: 0 }}>ERBB Dashboard</h1>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+        <h1 style={{ marginTop: 0 }}>ERBB Dashboard</h1>
+        <button
+          onClick={() => setRulesOpen(true)}
+          style={{
+            border: "1px solid #e5e7eb",
+            background: "#fff",
+            borderRadius: 12,
+            padding: "10px 12px",
+            cursor: "pointer",
+            fontWeight: 700,
+          }}
+        >
+          Правила
+        </button>
+      </div>
 
       <SignalCard signal={signal.signal} score={signal.finalScore} />
 
@@ -255,6 +249,8 @@ const Dashboard = () => {
       </div>
 
       <InsightList insights={insights} />
+
+      <RulesModal open={rulesOpen} onClose={() => setRulesOpen(false)} />
     </div>
   );
 };
