@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import axios from "axios";
 import { ethers } from "ethers";
 import {
@@ -88,6 +88,7 @@ const Dashboard = () => {
     [RPC_URL, chainId]
   );
   const contract = useMemo(() => new ethers.Contract(ERBB_ADDRESS, ERBB_ABI, provider), [provider]);
+  const erbbIface = useMemo(() => new ethers.Interface(ERBB_ABI), []);
 
   const [tokenDecimals, setTokenDecimals] = useState(18);
   const [signal, setSignal] = useState({ signal: "HOLD", finalScore: 0 });
@@ -97,6 +98,7 @@ const Dashboard = () => {
   const [lastUpdate, setLastUpdate] = useState(null);
   const [priceError, setPriceError] = useState(null);
   const [rulesOpen, setRulesOpen] = useState(false);
+  const lastPriceLogBlockRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -147,6 +149,55 @@ const Dashboard = () => {
     return null;
   };
 
+  const EVENT_NAMES = ["PriceUpdated", "ERBBPriceUpdated"];
+
+  const fetchErbbPriceFromEvents = async () => {
+    // Poll logs instead of `contract.on(...)` to avoid RPCs that don't support `eth_newFilter`.
+    const nowBlock = await provider.getBlockNumber();
+
+    const last = lastPriceLogBlockRef.current;
+    const fromBlock = last == null ? Math.max(0, nowBlock - 300) : last + 1;
+
+    lastPriceLogBlockRef.current = nowBlock;
+
+    let best = null; // { blockNumber, logIndex, priceRaw }
+
+    for (const eventName of EVENT_NAMES) {
+      try {
+        const topic = erbbIface.getEvent(eventName)?.topicHash;
+        if (!topic) continue;
+
+        const logs = await provider.getLogs({
+          address: ERBB_ADDRESS,
+          fromBlock,
+          toBlock: nowBlock,
+          topics: [topic],
+        });
+
+        for (const log of logs) {
+          const parsed = erbbIface.parseLog(log);
+          const priceRaw = parsed?.args?.[0];
+          if (priceRaw == null) continue;
+          const price = formatRawPrice(priceRaw);
+          if (price == null) continue;
+
+          const candidate = { blockNumber: log.blockNumber, logIndex: log.index, price };
+          if (
+            best == null ||
+            candidate.blockNumber > best.blockNumber ||
+            (candidate.blockNumber === best.blockNumber && candidate.logIndex > best.logIndex)
+          ) {
+            best = candidate;
+          }
+        }
+      } catch (e) {
+        // Non-fatal: continue to other events.
+      }
+    }
+
+    return best?.price ?? null;
+  };
+
   useEffect(() => {
     let cancelled = false;
 
@@ -170,14 +221,24 @@ const Dashboard = () => {
 
     const fetchPrice = async () => {
       try {
-        const formatted = await fetchErbbPriceFromContract();
+        // 1) Try view methods first
+        let formatted = await fetchErbbPriceFromContract();
+
+        // 2) Fallback: try events via polling logs
+        if (formatted == null) {
+          formatted = await fetchErbbPriceFromEvents();
+        }
+
         if (!cancelled && formatted != null) {
           setPriceError(null);
           setErbbPrice(formatted);
           appendPricePoint(formatted);
-        } else if (!cancelled) {
+          return;
+        }
+
+        if (!cancelled) {
           setPriceError(
-            "Could not read ERBB price from contract. Check RPC URL and that ABI methods match the deployed contract."
+            "Could not read ERBB price. Ensure correct contract ABI/methods or that the contract emits PriceUpdated/ERBBPriceUpdated events on the selected chain."
           );
         }
       } catch (e) {
