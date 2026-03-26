@@ -99,6 +99,7 @@ const Dashboard = () => {
   const [priceError, setPriceError] = useState(null);
   const [rulesOpen, setRulesOpen] = useState(false);
   const lastPriceLogBlockRef = useRef(null);
+  const lastEventFallbackFetchTsRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -151,14 +152,39 @@ const Dashboard = () => {
 
   const EVENT_NAMES = ["PriceUpdated", "ERBBPriceUpdated"];
 
+  const safeGetBlockNumber = async () => {
+    try {
+      return await provider.getBlockNumber();
+    } catch {
+      return null;
+    }
+  };
+
   const fetchErbbPriceFromEvents = async () => {
     // Poll logs instead of `contract.on(...)` to avoid RPCs that don't support `eth_newFilter`.
-    const nowBlock = await provider.getBlockNumber();
+    const nowBlock = await safeGetBlockNumber();
 
     const last = lastPriceLogBlockRef.current;
-    const fromBlock = last == null ? Math.max(0, nowBlock - 300) : last + 1;
+    // If the RPC doesn't support `eth_blockNumber`, we can't do a relative window.
+    // In that case, we fetch from earliest to latest and pick the latest emitted price.
+    // We also throttle to avoid hammering the RPC.
+    const cooldownMs = 60000;
+    const shouldThrottle = nowBlock == null && Date.now() - lastEventFallbackFetchTsRef.current < cooldownMs;
+    if (shouldThrottle) return null;
 
-    lastPriceLogBlockRef.current = nowBlock;
+    let fromBlock = 0;
+    let toBlock = "latest";
+
+    if (nowBlock == null) {
+      // RPC cannot report current block. We'll fetch everything up to `latest`
+      // and pick the latest price update.
+      lastEventFallbackFetchTsRef.current = Date.now();
+      lastPriceLogBlockRef.current = null;
+    } else {
+      fromBlock = last == null ? Math.max(0, nowBlock - 300) : last + 1;
+      toBlock = nowBlock;
+      lastPriceLogBlockRef.current = nowBlock;
+    }
 
     let best = null; // { blockNumber, logIndex, priceRaw }
 
@@ -170,7 +196,7 @@ const Dashboard = () => {
         const logs = await provider.getLogs({
           address: ERBB_ADDRESS,
           fromBlock,
-          toBlock: nowBlock,
+          toBlock,
           topics: [topic],
         });
 
