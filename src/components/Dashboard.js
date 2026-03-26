@@ -154,6 +154,23 @@ const Dashboard = () => {
     return null;
   };
 
+  const fetchErbbPriceFromCoinGecko = async (debug) => {
+    // CoinGecko free API – no key required, returns USD price by contract address.
+    const url =
+      `https://api.coingecko.com/api/v3/simple/token_price/ethereum` +
+      `?contract_addresses=${ERBB_ADDRESS.toLowerCase()}&vs_currencies=usd`;
+    try {
+      const res = await axios.get(url, { timeout: 8000 });
+      const entry = res?.data?.[ERBB_ADDRESS.toLowerCase()];
+      const n = Number(entry?.usd);
+      if (Number.isFinite(n) && n > 0) return n;
+      debug?.coingecko?.push({ status: "no usd price in response", raw: JSON.stringify(entry) });
+    } catch (e) {
+      debug?.coingecko?.push({ status: "request failed", message: e?.message?.slice(0, 120) });
+    }
+    return null;
+  };
+
   const fetchErbbPriceFromBackend = async (debug) => {
     // Last-resort fallback if ABI-based reads don't work on the selected chain/RPC.
     const endpoints = ["/api/price", "/api/erbb-price", "/api/token-price"];
@@ -298,17 +315,22 @@ const Dashboard = () => {
 
     const fetchPrice = async () => {
       try {
-        const debug = { contract: [], events: [], backend: [] };
+        const debug = { coingecko: [], contract: [], events: [], backend: [] };
 
-        // 1) Try view methods first
-        let formatted = await fetchErbbPriceFromContract(debug);
+        // 1) CoinGecko – most reliable source (ERBB has no on-chain price function)
+        let formatted = await fetchErbbPriceFromCoinGecko(debug);
 
-        // 2) Fallback: try events via polling logs
+        // 2) Fallback: try contract view methods
+        if (formatted == null) {
+          formatted = await fetchErbbPriceFromContract(debug);
+        }
+
+        // 3) Fallback: try events via polling logs
         if (formatted == null) {
           formatted = await fetchErbbPriceFromEvents(debug);
         }
 
-        // 3) Optional fallback: backend price endpoint (if provided)
+        // 4) Fallback: backend price endpoint (if provided)
         if (formatted == null) {
           formatted = await fetchErbbPriceFromBackend(debug);
         }
@@ -321,22 +343,22 @@ const Dashboard = () => {
         }
 
         if (!cancelled) {
+          const cgSummary =
+            debug.coingecko.length > 0
+              ? `coingecko: ${debug.coingecko[0].status}`
+              : "coingecko: no response";
+
           const contractSummary =
             debug.contract.length > 0
-              ? `contract read failed (last: ${debug.contract[debug.contract.length - 1].message})`
-              : "contract read returned null for all methods";
-
-          const eventsSummary =
-            debug.events.length > 0
-              ? `events fallback: ${debug.events[0].eventName || "unknown"} (${debug.events[0].status || debug.events[0].message || "no match"})`
-              : "events fallback: no debug info";
+              ? `contract: failed (${debug.contract[debug.contract.length - 1].fn})`
+              : "contract: no price functions";
 
           const backendSummary =
             debug.backend.length > 0
-              ? `backend fallback: tried ${debug.backend.length} endpoints (first: ${debug.backend[0].endpoint})`
-              : "backend fallback: no debug info";
+              ? `backend: tried ${debug.backend.length} endpoints`
+              : "backend: no debug info";
 
-          setPriceError(`Could not read ERBB price. ${contractSummary}. ${eventsSummary}. ${backendSummary}.`);
+          setPriceError(`Could not read ERBB price. ${cgSummary}. ${contractSummary}. ${backendSummary}.`);
         }
       } catch (e) {
         if (!cancelled) setPriceError(e?.message ?? "Failed to fetch price");
