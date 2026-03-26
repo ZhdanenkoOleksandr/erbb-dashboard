@@ -28,6 +28,11 @@ const ERBB_ABI = [
   "function currentPrice() view returns (uint256)",
   "function tokenPrice() view returns (uint256)",
   "function getTokenPrice() view returns (uint256)",
+  "function rate() view returns (uint256)",
+  "function getRate() view returns (uint256)",
+  "function exchangeRate() view returns (uint256)",
+  "function getERBBPrice() view returns (uint256)",
+  "function latestPrice() view returns (uint256)",
   "event PriceUpdated(uint256 price)",
   "event ERBBPriceUpdated(uint256 price)",
 ];
@@ -38,6 +43,11 @@ const PRICE_FUNCTION_CANDIDATES = [
   "currentPrice",
   "tokenPrice",
   "getTokenPrice",
+  "rate",
+  "getRate",
+  "exchangeRate",
+  "getERBBPrice",
+  "latestPrice",
 ];
 
 const formatTimeLabel = (ms) => {
@@ -209,66 +219,98 @@ const Dashboard = () => {
 
     const last = lastPriceLogBlockRef.current;
     // If the RPC doesn't support `eth_blockNumber`, we can't do a relative window.
-    // In that case, we fetch from earliest to latest and pick the latest emitted price.
     // We also throttle to avoid hammering the RPC.
     const cooldownMs = 60000;
     const shouldThrottle = nowBlock == null && Date.now() - lastEventFallbackFetchTsRef.current < cooldownMs;
-    if (shouldThrottle) return null;
+    if (shouldThrottle) {
+      const remaining = Math.ceil((cooldownMs - (Date.now() - lastEventFallbackFetchTsRef.current)) / 1000);
+      debug?.events?.push({ eventName: "all", status: `throttled – retry in ${remaining}s (block number unavailable)` });
+      return null;
+    }
 
     let fromBlock = 0;
     let toBlock = "latest";
 
     if (nowBlock == null) {
-      // RPC cannot report current block. We'll fetch everything up to `latest`
-      // and pick the latest price update.
+      // RPC cannot report current block; skip event log scan (fromBlock=0 is
+      // rejected by most public endpoints). Mark timestamp so the throttle
+      // above kicks in for the next 60 s.
       lastEventFallbackFetchTsRef.current = Date.now();
       lastPriceLogBlockRef.current = null;
+      debug?.events?.push({ eventName: "all", status: "skipped – block number unavailable; will retry after cooldown" });
+      return null;
     } else {
-      fromBlock = last == null ? Math.max(0, nowBlock - 300) : last + 1;
+      // Start with a small window (50 blocks). Many public RPCs (including
+      // cloudflare-eth.com) return -32603 for large getLogs ranges.
+      fromBlock = last == null ? Math.max(0, nowBlock - 50) : last + 1;
       toBlock = nowBlock;
       lastPriceLogBlockRef.current = nowBlock;
     }
 
-    let best = null; // { blockNumber, logIndex, priceRaw }
+    let best = null; // { blockNumber, logIndex, price }
 
     for (const eventName of EVENT_NAMES) {
-      try {
-        const topic = erbbIface.getEvent(eventName)?.topicHash;
-        if (!topic) continue;
+      const topic = erbbIface.getEvent(eventName)?.topicHash;
+      if (!topic) continue;
 
-        const logs = await provider.getLogs({
-          address: ERBB_ADDRESS,
-          fromBlock,
-          toBlock,
-          topics: [topic],
-        });
-
-        if (!logs || logs.length === 0) {
-          debug?.events?.push({ eventName, status: "no logs in window" });
+      // Retry with a shrinking window on -32603 / range-too-large errors.
+      let currentFrom = fromBlock;
+      let logs = null;
+      let logsError = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          logs = await provider.getLogs({
+            address: ERBB_ADDRESS,
+            fromBlock: currentFrom,
+            toBlock,
+            topics: [topic],
+          });
+          logsError = null;
+          break; // success
+        } catch (e) {
+          logsError = e;
+          const msg = e?.message ?? "";
+          const isRangeError =
+            (e?.error?.code === -32603 || e?.code === -32603) ||
+            msg.includes("-32603") ||
+            msg.includes("query returned more than") ||
+            msg.includes("block range");
+          if (!isRangeError) break; // not a range issue – don't retry
+          // Halve the window and retry
+          const half = Math.floor((toBlock - currentFrom) / 2);
+          if (half < 1) break;
+          currentFrom = toBlock - half;
         }
+      }
 
-        for (const log of logs) {
-          const parsed = erbbIface.parseLog(log);
-          const priceRaw = parsed?.args?.[0];
-          if (priceRaw == null) continue;
-          const price = formatRawPrice(priceRaw);
-          if (price == null) continue;
-
-          const candidate = { blockNumber: log.blockNumber, logIndex: log.index, price };
-          if (
-            best == null ||
-            candidate.blockNumber > best.blockNumber ||
-            (candidate.blockNumber === best.blockNumber && candidate.logIndex > best.logIndex)
-          ) {
-            best = candidate;
-          }
-        }
-      } catch (e) {
-        // Non-fatal: continue to other events.
+      if (logsError) {
         debug?.events?.push({
           eventName,
-          message: e?.message ? String(e.message).slice(0, 180) : "unknown error",
+          message: logsError?.message ? String(logsError.message).slice(0, 180) : "unknown error",
         });
+        continue;
+      }
+
+      if (!logs || logs.length === 0) {
+        debug?.events?.push({ eventName, status: "no logs in window" });
+        continue;
+      }
+
+      for (const log of logs) {
+        const parsed = erbbIface.parseLog(log);
+        const priceRaw = parsed?.args?.[0];
+        if (priceRaw == null) continue;
+        const price = formatRawPrice(priceRaw);
+        if (price == null) continue;
+
+        const candidate = { blockNumber: log.blockNumber, logIndex: log.index, price };
+        if (
+          best == null ||
+          candidate.blockNumber > best.blockNumber ||
+          (candidate.blockNumber === best.blockNumber && candidate.logIndex > best.logIndex)
+        ) {
+          best = candidate;
+        }
       }
     }
 
