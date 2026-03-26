@@ -136,7 +136,7 @@ const Dashboard = () => {
     setLastUpdate(new Date(now));
   };
 
-  const fetchErbbPriceFromContract = async () => {
+  const fetchErbbPriceFromContract = async (debug) => {
     for (const fn of PRICE_FUNCTION_CANDIDATES) {
       try {
         const raw = await contract[fn]();
@@ -145,12 +145,16 @@ const Dashboard = () => {
         if (formatted != null) return formatted;
       } catch (e) {
         // Try next candidate function.
+        debug?.contract?.push({
+          fn,
+          message: e?.message ? String(e.message).slice(0, 180) : "unknown error",
+        });
       }
     }
     return null;
   };
 
-  const fetchErbbPriceFromBackend = async () => {
+  const fetchErbbPriceFromBackend = async (debug) => {
     // Last-resort fallback if ABI-based reads don't work on the selected chain/RPC.
     const endpoints = ["/api/price", "/api/erbb-price", "/api/token-price"];
 
@@ -162,7 +166,10 @@ const Dashboard = () => {
         const raw =
           data?.price ?? data?.erbbPrice ?? data?.tokenPrice ?? data?.currentPrice ?? data?.value;
 
-        if (raw == null) continue;
+        if (raw == null) {
+          debug?.backend?.push({ endpoint: ep, status: "no price field in response" });
+          continue;
+        }
 
         // If backend returns raw integer units (as string), format it using tokenDecimals.
         if (typeof raw === "string" && /^\d+$/.test(raw)) {
@@ -176,8 +183,10 @@ const Dashboard = () => {
 
         const n = Number(raw);
         if (Number.isFinite(n)) return n;
+        debug?.backend?.push({ endpoint: ep, status: "non-numeric price field" });
       } catch {
         // try next endpoint
+        debug?.backend?.push({ endpoint: ep, status: "request failed" });
       }
     }
 
@@ -194,7 +203,7 @@ const Dashboard = () => {
     }
   };
 
-  const fetchErbbPriceFromEvents = async () => {
+  const fetchErbbPriceFromEvents = async (debug) => {
     // Poll logs instead of `contract.on(...)` to avoid RPCs that don't support `eth_newFilter`.
     const nowBlock = await safeGetBlockNumber();
 
@@ -234,6 +243,10 @@ const Dashboard = () => {
           topics: [topic],
         });
 
+        if (!logs || logs.length === 0) {
+          debug?.events?.push({ eventName, status: "no logs in window" });
+        }
+
         for (const log of logs) {
           const parsed = erbbIface.parseLog(log);
           const priceRaw = parsed?.args?.[0];
@@ -252,6 +265,10 @@ const Dashboard = () => {
         }
       } catch (e) {
         // Non-fatal: continue to other events.
+        debug?.events?.push({
+          eventName,
+          message: e?.message ? String(e.message).slice(0, 180) : "unknown error",
+        });
       }
     }
 
@@ -281,17 +298,19 @@ const Dashboard = () => {
 
     const fetchPrice = async () => {
       try {
+        const debug = { contract: [], events: [], backend: [] };
+
         // 1) Try view methods first
-        let formatted = await fetchErbbPriceFromContract();
+        let formatted = await fetchErbbPriceFromContract(debug);
 
         // 2) Fallback: try events via polling logs
         if (formatted == null) {
-          formatted = await fetchErbbPriceFromEvents();
+          formatted = await fetchErbbPriceFromEvents(debug);
         }
 
         // 3) Optional fallback: backend price endpoint (if provided)
         if (formatted == null) {
-          formatted = await fetchErbbPriceFromBackend();
+          formatted = await fetchErbbPriceFromBackend(debug);
         }
 
         if (!cancelled && formatted != null) {
@@ -302,9 +321,22 @@ const Dashboard = () => {
         }
 
         if (!cancelled) {
-          setPriceError(
-            "Could not read ERBB price. Ensure correct contract ABI/methods or that the contract emits PriceUpdated/ERBBPriceUpdated events on the selected chain."
-          );
+          const contractSummary =
+            debug.contract.length > 0
+              ? `contract read failed (last: ${debug.contract[debug.contract.length - 1].message})`
+              : "contract read returned null for all methods";
+
+          const eventsSummary =
+            debug.events.length > 0
+              ? `events fallback: ${debug.events[0].eventName || "unknown"} (${debug.events[0].status || debug.events[0].message || "no match"})`
+              : "events fallback: no debug info";
+
+          const backendSummary =
+            debug.backend.length > 0
+              ? `backend fallback: tried ${debug.backend.length} endpoints (first: ${debug.backend[0].endpoint})`
+              : "backend fallback: no debug info";
+
+          setPriceError(`Could not read ERBB price. ${contractSummary}. ${eventsSummary}. ${backendSummary}.`);
         }
       } catch (e) {
         if (!cancelled) setPriceError(e?.message ?? "Failed to fetch price");
