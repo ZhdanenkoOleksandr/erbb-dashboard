@@ -24,6 +24,8 @@ const PAIR_ABI = [
 
 const ETH_USD_URL =
   "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd";
+const COINGECKO_TOKEN_URL =
+  `https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses=${ERBB_ADDRESS.toLowerCase()}&vs_currencies=usd,eth`;
 
 async function fetchEthUsd() {
   try {
@@ -31,6 +33,22 @@ async function fetchEthUsd() {
     const json = await res.json();
     const n = Number(json?.ethereum?.usd);
     return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCoinGeckoPrice() {
+  try {
+    const res = await fetch(COINGECKO_TOKEN_URL, { signal: AbortSignal.timeout(8000) });
+    const json = await res.json();
+    const entry = json?.[ERBB_ADDRESS.toLowerCase()];
+    const usd = Number(entry?.usd);
+    const eth = Number(entry?.eth);
+    if (Number.isFinite(usd) && usd > 0) {
+      return { erbbInUsd: usd, erbbInEth: Number.isFinite(eth) && eth > 0 ? eth : null };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -97,23 +115,45 @@ export function useERBBUniswapPrice() {
 
     const run = async () => {
       try {
-        const [{ erbbInEth, noLiquidity }, ethUsd] = await Promise.all([
+        const [onChain, ethUsd] = await Promise.all([
           fetchOnChainPrice(),
           fetchEthUsd(),
         ]);
 
         if (!mountedRef.current) return;
 
-        const erbbInUsd =
-          erbbInEth != null && ethUsd != null ? erbbInEth * ethUsd : null;
+        // If Uniswap V2 has no pool, fall back to CoinGecko
+        if (onChain.noLiquidity) {
+          const cg = await fetchCoinGeckoPrice();
+          if (!mountedRef.current) return;
+          if (cg) {
+            setState({
+              erbbInEth: cg.erbbInEth,
+              erbbInUsd: cg.erbbInUsd,
+              ethUsd,
+              loading: false,
+              noLiquidity: false,
+              error: null,
+              source: "coingecko",
+            });
+            return;
+          }
+          // CoinGecko also has nothing
+          setState((prev) => ({ ...prev, loading: false, noLiquidity: true, error: null }));
+          return;
+        }
+
+        const { erbbInEth } = onChain;
+        const erbbInUsd = erbbInEth != null && ethUsd != null ? erbbInEth * ethUsd : null;
 
         setState({
           erbbInEth,
           erbbInUsd,
           ethUsd,
           loading: false,
-          noLiquidity: noLiquidity ?? false,
+          noLiquidity: false,
           error: null,
+          source: "uniswap-v2",
         });
       } catch (e) {
         if (!mountedRef.current) return;

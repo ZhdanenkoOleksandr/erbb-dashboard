@@ -117,7 +117,7 @@ function PriceRow({ label, value, accent = "#00d4ff", flashing }) {
 
 /* ─── main component ─── */
 export function ERBBPriceWeb4() {
-  const { erbbInEth, erbbInUsd, ethUsd, loading, noLiquidity, error } =
+  const { erbbInEth, erbbInUsd, ethUsd, loading, noLiquidity, error, source } =
     useERBBUniswapPrice();
 
   // Flash effect on price update
@@ -216,7 +216,7 @@ export function ERBBPriceWeb4() {
             fontFamily: "monospace",
           }}
         >
-          ON-CHAIN · 30s
+          {source === "coingecko" ? "COINGECKO · 30s" : "ON-CHAIN · 30s"}
         </span>
       </div>
 
@@ -290,7 +290,7 @@ export function ERBBPriceWeb4() {
               fontFamily: "monospace",
             }}
           >
-            UNISWAP V2 · RESERVE RATIO
+            {source === "coingecko" ? "COINGECKO API · PRICE" : "UNISWAP V2 · RESERVE RATIO"}
           </span>
           <span
             style={{
