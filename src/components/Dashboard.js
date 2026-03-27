@@ -14,6 +14,7 @@ import {
 import SignalCard from "./SignalCard";
 import InsightList from "./InsightList";
 import RulesModal from "./RulesModal";
+import { ERBBPriceWeb4 } from "./ERBBPriceWeb4";
 
 // ERBB Smart Contract
 const ERBB_ADDRESS = "0x5702A4487dA07c827cdE512e2d5969CB430cd839";
@@ -403,20 +404,7 @@ const Dashboard = () => {
 
       <SignalCard signal={signal.signal} score={signal.finalScore} />
 
-      <div style={{ margin: "12px 0 18px" }}>
-        <div style={{ fontSize: 18, fontWeight: 700 }}>
-          Current ERBB Price:{" "}
-          {erbbPrice == null ? "—" : erbbPrice.toFixed(6)}
-        </div>
-        <div style={{ color: "#6b7280", fontSize: 12, marginTop: 4 }}>
-          Last update: {lastUpdate ? lastUpdate.toLocaleString() : "—"}
-        </div>
-        {priceError ? (
-          <div style={{ color: "#b91c1c", fontSize: 12, marginTop: 6 }}>
-            Price error: {priceError}
-          </div>
-        ) : null}
-      </div>
+      <ERBBPriceWeb4 />
 
       <div style={{ margin: "20px 0", width: "100%", height: 320 }}>
         <ResponsiveContainer width="100%" height="100%">

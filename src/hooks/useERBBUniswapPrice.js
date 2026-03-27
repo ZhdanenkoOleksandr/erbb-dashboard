@@ -1,0 +1,123 @@
+import { useEffect, useRef, useState } from "react";
+import { ethers } from "ethers";
+
+const ERBB_ADDRESS   = "0x5702A4487dA07c827cdE512e2d5969CB430cd839";
+const WETH_ADDRESS   = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
+const FACTORY_ADDRESS = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f";
+const RPC_URL        = "https://rpc.ankr.com/eth";
+const REFRESH_MS     = 30_000;
+
+const FACTORY_ABI = [
+  "function getPair(address tokenA, address tokenB) external view returns (address pair)",
+];
+
+const PAIR_ABI = [
+  "function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast)",
+  "function token0() external view returns (address)",
+];
+
+const ETH_USD_URL =
+  "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd";
+
+async function fetchEthUsd() {
+  try {
+    const res = await fetch(ETH_USD_URL, { signal: AbortSignal.timeout(6000) });
+    const json = await res.json();
+    const n = Number(json?.ethereum?.usd);
+    return Number.isFinite(n) && n > 0 ? n : null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchOnChainPrice() {
+  const provider = new ethers.JsonRpcProvider(RPC_URL, 1, { staticNetwork: true });
+
+  // 1. Find the ERBB/WETH pair via Factory
+  const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
+  const pairAddress = await factory.getPair(ERBB_ADDRESS, WETH_ADDRESS);
+
+  if (!pairAddress || pairAddress === ethers.ZeroAddress) {
+    return { erbbInEth: null, noLiquidity: true };
+  }
+
+  // 2. Read reserves and token order
+  const pair = new ethers.Contract(pairAddress, PAIR_ABI, provider);
+  const [reserves, token0] = await Promise.all([
+    pair.getReserves(),
+    pair.token0(),
+  ]);
+
+  const erbbIsToken0 = token0.toLowerCase() === ERBB_ADDRESS.toLowerCase();
+  const reserveERBB = erbbIsToken0 ? reserves[0] : reserves[1];
+  const reserveWETH = erbbIsToken0 ? reserves[1] : reserves[0];
+
+  if (reserveERBB === 0n) {
+    return { erbbInEth: null, noLiquidity: true };
+  }
+
+  // Both ERBB and WETH use 18 decimals – ratio gives ETH price per ERBB
+  const erbbInEth =
+    Number(ethers.formatUnits(reserveWETH, 18)) /
+    Number(ethers.formatUnits(reserveERBB, 18));
+
+  return { erbbInEth, noLiquidity: false };
+}
+
+export function useERBBUniswapPrice() {
+  const [state, setState] = useState({
+    erbbInEth: null,
+    erbbInUsd: null,
+    ethUsd:    null,
+    loading:   true,
+    noLiquidity: false,
+    error:     null,
+  });
+
+  const intervalRef = useRef(null);
+  const mountedRef  = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+
+    const run = async () => {
+      try {
+        const [{ erbbInEth, noLiquidity }, ethUsd] = await Promise.all([
+          fetchOnChainPrice(),
+          fetchEthUsd(),
+        ]);
+
+        if (!mountedRef.current) return;
+
+        const erbbInUsd =
+          erbbInEth != null && ethUsd != null ? erbbInEth * ethUsd : null;
+
+        setState({
+          erbbInEth,
+          erbbInUsd,
+          ethUsd,
+          loading: false,
+          noLiquidity: noLiquidity ?? false,
+          error: null,
+        });
+      } catch (e) {
+        if (!mountedRef.current) return;
+        setState((prev) => ({
+          ...prev,
+          loading: false,
+          error: e?.message ?? "fetch failed",
+        }));
+      }
+    };
+
+    run();
+    intervalRef.current = setInterval(run, REFRESH_MS);
+
+    return () => {
+      mountedRef.current = false;
+      clearInterval(intervalRef.current);
+    };
+  }, []);
+
+  return state;
+}
