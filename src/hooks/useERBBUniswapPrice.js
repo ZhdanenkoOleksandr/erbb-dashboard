@@ -4,7 +4,13 @@ import { ethers } from "ethers";
 const ERBB_ADDRESS   = "0x5702A4487dA07c827cdE512e2d5969CB430cd839";
 const WETH_ADDRESS   = "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2";
 const FACTORY_ADDRESS = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f";
-const RPC_URL        = "https://rpc.ankr.com/eth";
+const RPC_URLS = [
+  "https://rpc.ankr.com/eth",
+  "https://eth.llamarpc.com",
+  "https://1rpc.io/eth",
+  "https://ethereum.publicnode.com",
+  "https://cloudflare-eth.com",
+];
 const REFRESH_MS     = 30_000;
 
 const FACTORY_ABI = [
@@ -30,10 +36,9 @@ async function fetchEthUsd() {
   }
 }
 
-async function fetchOnChainPrice() {
-  const provider = new ethers.JsonRpcProvider(RPC_URL, 1, { staticNetwork: true });
+async function fetchOnChainPriceWithRpc(rpcUrl) {
+  const provider = new ethers.JsonRpcProvider(rpcUrl, 1, { staticNetwork: true });
 
-  // 1. Find the ERBB/WETH pair via Factory
   const factory = new ethers.Contract(FACTORY_ADDRESS, FACTORY_ABI, provider);
   const pairAddress = await factory.getPair(ERBB_ADDRESS, WETH_ADDRESS);
 
@@ -41,7 +46,6 @@ async function fetchOnChainPrice() {
     return { erbbInEth: null, noLiquidity: true };
   }
 
-  // 2. Read reserves and token order
   const pair = new ethers.Contract(pairAddress, PAIR_ABI, provider);
   const [reserves, token0] = await Promise.all([
     pair.getReserves(),
@@ -56,12 +60,23 @@ async function fetchOnChainPrice() {
     return { erbbInEth: null, noLiquidity: true };
   }
 
-  // Both ERBB and WETH use 18 decimals – ratio gives ETH price per ERBB
   const erbbInEth =
     Number(ethers.formatUnits(reserveWETH, 18)) /
     Number(ethers.formatUnits(reserveERBB, 18));
 
   return { erbbInEth, noLiquidity: false };
+}
+
+async function fetchOnChainPrice() {
+  let lastError;
+  for (const rpcUrl of RPC_URLS) {
+    try {
+      return await fetchOnChainPriceWithRpc(rpcUrl);
+    } catch (e) {
+      lastError = e;
+    }
+  }
+  throw lastError;
 }
 
 export function useERBBUniswapPrice() {
