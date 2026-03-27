@@ -216,7 +216,7 @@ export function ERBBPriceWeb4() {
             fontFamily: "monospace",
           }}
         >
-          {source === "coingecko" ? "COINGECKO · 30s" : "ON-CHAIN · 30s"}
+          {source === "coingecko" ? "COINGECKO · 30s" : source === "coinmarketcap" ? "CMC · 30s" : "ON-CHAIN · 30s"}
         </span>
       </div>
 
@@ -290,7 +290,7 @@ export function ERBBPriceWeb4() {
               fontFamily: "monospace",
             }}
           >
-            {source === "coingecko" ? "COINGECKO API · PRICE" : "UNISWAP V2 · RESERVE RATIO"}
+            {source === "coingecko" ? "COINGECKO API · PRICE" : source === "coinmarketcap" ? "COINMARKETCAP · PRICE" : "UNISWAP V2 · RESERVE RATIO"}
           </span>
           <span
             style={{

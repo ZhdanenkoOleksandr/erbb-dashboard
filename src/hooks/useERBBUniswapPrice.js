@@ -26,6 +26,10 @@ const ETH_USD_URL =
   "https://api.coingecko.com/api/v3/simple/price?ids=ethereum&vs_currencies=usd";
 const COINGECKO_TOKEN_URL =
   `https://api.coingecko.com/api/v3/simple/token_price/ethereum?contract_addresses=${ERBB_ADDRESS.toLowerCase()}&vs_currencies=usd,eth`;
+const CMC_API_KEY =
+  process.env.REACT_APP_CMC_API_KEY || "878c7b3927504821b23dd8e805f9d726";
+const CMC_URL =
+  `https://pro-api.coinmarketcap.com/v2/cryptocurrency/quotes/latest?address=${ERBB_ADDRESS.toLowerCase()}&convert=USD`;
 
 async function fetchEthUsd() {
   try {
@@ -47,6 +51,26 @@ async function fetchCoinGeckoPrice() {
     const eth = Number(entry?.eth);
     if (Number.isFinite(usd) && usd > 0) {
       return { erbbInUsd: usd, erbbInEth: Number.isFinite(eth) && eth > 0 ? eth : null };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+async function fetchCMCPrice() {
+  try {
+    const res = await fetch(CMC_URL, {
+      headers: { "X-CMC_PRO_API_KEY": CMC_API_KEY },
+      signal: AbortSignal.timeout(8000),
+    });
+    const json = await res.json();
+    // Response: { data: { "TOKEN_SYMBOL": [{ quote: { USD: { price } } }] } }
+    const entries = json?.data ? Object.values(json.data) : [];
+    for (const list of entries) {
+      const item = Array.isArray(list) ? list[0] : list;
+      const usd = Number(item?.quote?.USD?.price);
+      if (Number.isFinite(usd) && usd > 0) return { erbbInUsd: usd, erbbInEth: null };
     }
     return null;
   } catch {
@@ -122,23 +146,24 @@ export function useERBBUniswapPrice() {
 
         if (!mountedRef.current) return;
 
-        // If Uniswap V2 has no pool, fall back to CoinGecko
+        // If Uniswap V2 has no pool, fall back to CoinGecko → CMC
         if (onChain.noLiquidity) {
-          const cg = await fetchCoinGeckoPrice();
+          const [cg, cmc] = await Promise.all([fetchCoinGeckoPrice(), fetchCMCPrice()]);
           if (!mountedRef.current) return;
-          if (cg) {
+          const result = cg || cmc;
+          const src = cg ? "coingecko" : cmc ? "coinmarketcap" : null;
+          if (result) {
             setState({
-              erbbInEth: cg.erbbInEth,
-              erbbInUsd: cg.erbbInUsd,
+              erbbInEth: result.erbbInEth,
+              erbbInUsd: result.erbbInUsd,
               ethUsd,
               loading: false,
               noLiquidity: false,
               error: null,
-              source: "coingecko",
+              source: src,
             });
             return;
           }
-          // CoinGecko also has nothing
           setState((prev) => ({ ...prev, loading: false, noLiquidity: true, error: null }));
           return;
         }
